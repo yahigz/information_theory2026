@@ -10,44 +10,62 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+import yaml
+from clearml import Task
 
 RUNTIME_DIR = Path.cwd() / ".runtime"
-RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
-os.environ.setdefault("MPLCONFIGDIR", str(RUNTIME_DIR / "matplotlib"))
-os.environ.setdefault("CLEARML_CACHE_DIR", str(RUNTIME_DIR / "clearml_cache"))
 
-import matplotlib.pyplot as plt
-import numpy as np
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import yaml
-from clearml import Dataset as ClearMLDataset
-from clearml import Task
-from torch.utils.data import DataLoader, Dataset as TorchDataset
+np = None
+torch = None
+nn = None
+F = None
+plt = None
+ClearMLDataset = None
+DataLoader = None
+TensorDataset = None
 
 
 @dataclass
 class SplitData:
-    inputs: torch.Tensor
-    targets: torch.Tensor
-
-
-class ModularArithmeticDataset(TorchDataset):
-    def __init__(self, inputs: torch.Tensor, targets: torch.Tensor) -> None:
-        self.inputs = inputs.long()
-        self.targets = targets.long()
-
-    def __len__(self) -> int:
-        return self.inputs.shape[0]
-
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
-        return self.inputs[idx], self.targets[idx]
+    inputs: Any
+    targets: Any
 
 
 def load_config(path: Path) -> dict[str, Any]:
     with path.open("r", encoding="utf-8") as fh:
         return yaml.safe_load(fh)
+
+
+def training_deps_loaded() -> bool:
+    return torch is not None
+
+
+def bootstrap_training_runtime() -> None:
+    global np, torch, nn, F, plt, ClearMLDataset, DataLoader, TensorDataset
+    if training_deps_loaded():
+        return
+
+    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    os.environ.setdefault("MPLCONFIGDIR", str(RUNTIME_DIR / "matplotlib"))
+    os.environ.setdefault("CLEARML_CACHE_DIR", str(RUNTIME_DIR / "clearml_cache"))
+
+    import matplotlib.pyplot as _plt
+    import numpy as _np
+    import torch as _torch
+    import torch.nn as _nn
+    import torch.nn.functional as _F
+    from clearml import Dataset as _ClearMLDataset
+    from torch.utils.data import DataLoader as _DataLoader
+    from torch.utils.data import TensorDataset as _TensorDataset
+
+    np = _np
+    torch = _torch
+    nn = _nn
+    F = _F
+    plt = _plt
+    ClearMLDataset = _ClearMLDataset
+    DataLoader = _DataLoader
+    TensorDataset = _TensorDataset
 
 
 def set_seed(seed: int) -> None:
@@ -225,6 +243,9 @@ def load_splits(data_cfg: dict[str, Any]) -> dict[str, SplitData]:
     return load_npz_splits(npz_path, data_cfg)
 
 
+bootstrap_training_runtime()
+
+
 class TransformerBlock(nn.Module):
     def __init__(self, d_model: int, n_heads: int, ff_mult: int, dropout: float, use_layer_norm: bool) -> None:
         super().__init__()
@@ -296,7 +317,7 @@ def init_weights(module: nn.Module, init_scale: float) -> None:
 def make_dataloaders(splits: dict[str, SplitData], batch_size: int) -> dict[str, DataLoader]:
     return {
         name: DataLoader(
-            ModularArithmeticDataset(split.inputs, split.targets),
+            TensorDataset(split.inputs.long(), split.targets.long()),
             batch_size=batch_size,
             shuffle=(name == "train"),
         )
@@ -561,7 +582,6 @@ def main() -> None:
     args = parser.parse_args()
 
     cfg = load_config(args.config)
-    set_seed(int(cfg["experiment"]["seed"]))
 
     task = Task.init(
         project_name=cfg["experiment"]["project_name"],
@@ -573,6 +593,8 @@ def main() -> None:
     if remote_cfg.get("queue"):
         task.execute_remotely(queue_name=remote_cfg["queue"], exit_process=True)
 
+    bootstrap_training_runtime()
+    set_seed(int(cfg["experiment"]["seed"]))
     device = resolve_device(cfg["training"]["device"])
     splits = load_splits(cfg["data"])
     split_summary = build_split_summary(cfg, splits)

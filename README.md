@@ -33,10 +33,15 @@ clearml:
 Тогда локальный запуск только создаст задачу и отправит ее в очередь, а воркер подхватит обучение сам:
 
 ```bash
-uv run train_grokking.py --config configs/grokking_mod_prime_113.yaml
+./run_experiment.sh configs/grokking_mod_prime_113.yaml
 ```
 
 Если `queue: null`, обучение идет сразу в текущем процессе.
+
+Важно:
+- при `queue != null` локальный запуск не должен тянуть `torch/numpy/matplotlib`
+- для локальной отправки задачи достаточно Python с `clearml` и `pyyaml`
+- полноценные training-зависимости ставятся уже на воркере
 
 ## Как прокинуть свои данные из ClearML
 
