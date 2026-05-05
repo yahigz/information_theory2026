@@ -591,7 +591,16 @@ def main() -> None:
     logger = task.get_logger()
     remote_cfg = cfg.get("clearml", {})
     if remote_cfg.get("queue"):
-        task.execute_remotely(queue_name=remote_cfg["queue"], exit_process=True)
+        # Use Docker image if specified (ensures consistent PyTorch version on remote worker)
+        docker_image = remote_cfg.get("docker_image")
+        if docker_image:
+            task.execute_remotely(
+                queue_name=remote_cfg["queue"],
+                exit_process=True,
+                docker_image=docker_image
+            )
+        else:
+            task.execute_remotely(queue_name=remote_cfg["queue"], exit_process=True)
 
     bootstrap_training_runtime()
     set_seed(int(cfg["experiment"]["seed"]))

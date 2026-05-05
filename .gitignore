@@ -4,3 +4,4 @@ artifacts/
 .runtime/
 artifacts_smoke/
 *.pyc
+.env

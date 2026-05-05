@@ -1,16 +1,16 @@
 experiment:
   project_name: "information-theory"
-  task_name: "trying-to-grok-modular-addition-with-prime-113"
+  task_name: "trying-to-grok-modular-addition-with-prime-113-nodocker"
   tags:
     - grokking
     - modular-arithmetic
     - transformer
     - clearml
+    - nodocker
   seed: 17
 
 clearml:
   queue: gpu
-  docker_image: "andryusha2006/pytorch-cu117:2.0.0"
 
 data:
   source:
