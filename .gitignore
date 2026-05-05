@@ -1,4 +1,6 @@
 .venv/
 __pycache__/
 artifacts/
+.runtime/
+artifacts_smoke/
 *.pyc
