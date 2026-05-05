@@ -1,6 +1,6 @@
 experiment:
   project_name: "information-theory"
-  task_name: "grokking-mod113-small-transformer"
+  task_name: "trying-to-grok-modular-addition-with-prime-113"
   tags:
     - grokking
     - modular-arithmetic

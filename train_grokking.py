@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import importlib.metadata
 import math
 import os
 import random
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -456,7 +458,11 @@ def infer_model_vocab_and_classes(cfg: dict[str, Any], splits: dict[str, SplitDa
 def build_runtime_summary(device: torch.device) -> dict[str, Any]:
     summary: dict[str, Any] = {
         "device": str(device),
+        "python_version": sys.version.replace("\n", " "),
+        "python_executable": sys.executable,
         "torch_version": str(torch.__version__),
+        "torch_package_path": str(Path(torch.__file__).resolve()),
+        "torch_cuda_build": str(torch.version.cuda),
         "numpy_version": str(np.__version__),
         "cuda_available": bool(torch.cuda.is_available()),
         "mps_available": bool(torch.backends.mps.is_available()),
@@ -464,6 +470,17 @@ def build_runtime_summary(device: torch.device) -> dict[str, Any]:
     if torch.cuda.is_available():
         summary["cuda_device_name"] = str(torch.cuda.get_device_name(0))
     return summary
+
+
+def build_dependency_summary() -> dict[str, str]:
+    packages = ["torch", "numpy", "matplotlib", "clearml", "PyYAML"]
+    resolved: dict[str, str] = {}
+    for package in packages:
+        try:
+            resolved[package] = importlib.metadata.version(package)
+        except importlib.metadata.PackageNotFoundError:
+            resolved[package] = "not-installed"
+    return resolved
 
 
 def confusion_figure(prime: int, preds: torch.Tensor, targets: torch.Tensor) -> plt.Figure:
@@ -566,6 +583,7 @@ def main() -> None:
     report_text_block(logger, "Split summary", yaml.safe_dump(split_summary, sort_keys=False))
     report_text_block(logger, "Config", yaml.safe_dump(cfg, sort_keys=False))
     report_text_block(logger, "Runtime summary", yaml.safe_dump(build_runtime_summary(device), sort_keys=False))
+    report_text_block(logger, "Dependency summary", yaml.safe_dump(build_dependency_summary(), sort_keys=False))
 
     model = SmallTransformer(vocab_size=vocab_size, num_classes=num_classes, **cfg["model"]).to(device)
     model.apply(lambda module: init_weights(module, float(cfg["training"]["init_scale"])))
