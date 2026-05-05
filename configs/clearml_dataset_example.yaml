@@ -1,0 +1,52 @@
+experiment:
+  project_name: "information-theory"
+  task_name: "my-data-transformer"
+  tags:
+    - clearml
+    - dataset
+  seed: 17
+
+clearml:
+  queue: "gpu"
+
+data:
+  source:
+    mode: "clearml_dataset_npz"
+    dataset_id: "PUT_YOUR_DATASET_ID_HERE"
+    relative_path: "data/train_bundle.npz"
+  train_fraction: 0.3
+  train_size: null
+  val_fraction: 0.1
+  split_seed: 17
+
+model:
+  d_model: 128
+  n_heads: 4
+  ff_mult: 4
+  n_layers: 1
+  dropout: 0.0
+  use_layer_norm: false
+  token_embedding_std: 1.0
+
+training:
+  device: "auto"
+  epochs: 4000
+  batch_size: 256
+  optimizer: "adamw"
+  lr: 0.001
+  betas: [0.9, 0.98]
+  weight_decay: 0.1
+  grad_clip_norm: 1.0
+  label_smoothing: 0.0
+  init_scale: 1.0
+  scheduler: "cosine"
+  warmup_steps: 200
+
+logging:
+  train_eval_interval: 25
+  full_eval_interval: 50
+  sample_predictions: 12
+  histogram_interval: 200
+  plot_interval: 100
+  save_dir: "artifacts"
+  checkpoint_interval: 500

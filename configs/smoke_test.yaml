@@ -1,0 +1,47 @@
+experiment:
+  project_name: "information-theory"
+  task_name: "smoke-grokking-mod17"
+  tags:
+    - smoke-test
+    - grokking
+  seed: 17
+
+data:
+  prime: 17
+  operation: "add"
+  train_fraction: 0.3
+  train_size: null
+  val_fraction: 0.1
+  split_seed: 17
+
+model:
+  d_model: 32
+  n_heads: 4
+  ff_mult: 2
+  n_layers: 1
+  dropout: 0.0
+  use_layer_norm: false
+  token_embedding_std: 1.0
+
+training:
+  device: "cpu"
+  epochs: 2
+  batch_size: 64
+  optimizer: "adamw"
+  lr: 0.001
+  betas: [0.9, 0.98]
+  weight_decay: 0.1
+  grad_clip_norm: 1.0
+  label_smoothing: 0.0
+  init_scale: 1.0
+  scheduler: "cosine"
+  warmup_steps: 1
+
+logging:
+  train_eval_interval: 1
+  full_eval_interval: 1
+  sample_predictions: 5
+  histogram_interval: 1
+  plot_interval: 1
+  save_dir: "artifacts_smoke"
+  checkpoint_interval: 10

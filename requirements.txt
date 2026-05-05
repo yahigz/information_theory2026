@@ -1,0 +1,5 @@
+torch>=2.2
+numpy>=1.26
+matplotlib>=3.8
+clearml>=1.16
+pyyaml>=6.0
