@@ -472,6 +472,20 @@ def report_text_block(logger: Any, title: str, text: str) -> None:
     logger.report_text(f"{title}\n{text}")
 
 
+def report_scalar_strict(
+    logger: Any,
+    title: str,
+    series: str,
+    iteration: int,
+    value: float,
+) -> None:
+    # Enforce numeric monotonic-style reporting expected by ClearML charts.
+    v = float(value)
+    if not math.isfinite(v):
+        return
+    logger.report_scalar(title=title, series=series, iteration=int(iteration), value=v)
+
+
 def build_split_summary(cfg: dict[str, Any], splits: dict[str, SplitData]) -> dict[str, Any]:
     source_mode = cfg["data"].get("source", {}).get("mode", "generated")
     total = int(splits["all"].targets.numel())
@@ -642,6 +656,7 @@ def main() -> None:
         project_name=cfg["experiment"]["project_name"],
         task_name=cfg["experiment"]["task_name"],
         tags=cfg["experiment"].get("tags", []),
+        auto_connect_frameworks=False,
     )
     logger = task.get_logger()
     remote_cfg = cfg.get("clearml", {})
@@ -720,11 +735,8 @@ def main() -> None:
             # per-iteration logging (train loss every step)
             global_step += 1
             current_lr = optimizer.param_groups[0]["lr"]
-            try:
-                logger.report_scalar("loss", "train", iteration=global_step, value=loss.item())
-                logger.report_scalar("optimization", "lr", iteration=global_step, value=current_lr)
-            except Exception:
-                pass
+            report_scalar_strict(logger, "loss_step", "train", global_step, loss.item())
+            report_scalar_strict(logger, "optimization_step", "lr", global_step, current_lr)
 
             if (global_step % PRINT_EVERY) == 0:
                 print(f"Epoch {epoch} step {global_step} batch {batch_idx} loss={loss.item():.4f} lr={current_lr:.6e}", flush=True)
@@ -740,13 +752,13 @@ def main() -> None:
         epoch_time = time.time() - epoch_start
         current_lr = optimizer.param_groups[0]["lr"]
 
-        logger.report_scalar("loss_epoch", "train", iteration=epoch, value=train_loss_epoch)
-        logger.report_scalar("accuracy_epoch", "train", iteration=epoch, value=train_acc_epoch)
-        logger.report_scalar("optimization_epoch", "lr", iteration=epoch, value=current_lr)
-        logger.report_scalar("optimization_epoch", "grad_norm", iteration=epoch, value=last_grad_norm)
-        logger.report_scalar("optimization_epoch", "parameter_norm", iteration=epoch, value=parameter_l2_norm(model))
-        logger.report_scalar("optimization_epoch", "embedding_norm", iteration=epoch, value=embedding_l2_norm(model))
-        logger.report_scalar("runtime_epoch", "seconds", iteration=epoch, value=epoch_time)
+        report_scalar_strict(logger, "loss_epoch", "train", epoch, train_loss_epoch)
+        report_scalar_strict(logger, "accuracy_epoch", "train", epoch, train_acc_epoch)
+        report_scalar_strict(logger, "optimization_epoch", "lr", epoch, current_lr)
+        report_scalar_strict(logger, "optimization_epoch", "grad_norm", epoch, last_grad_norm)
+        report_scalar_strict(logger, "optimization_epoch", "parameter_norm", epoch, parameter_l2_norm(model))
+        report_scalar_strict(logger, "optimization_epoch", "embedding_norm", epoch, embedding_l2_norm(model))
+        report_scalar_strict(logger, "runtime_epoch", "seconds", epoch, epoch_time)
 
         if epoch % int(cfg["logging"]["train_eval_interval"]) == 0 or epoch == 1:
             train_eval = evaluate(
@@ -755,10 +767,10 @@ def main() -> None:
                 device,
                 label_smoothing=float(cfg["training"]["label_smoothing"]),
             )
-            logger.report_scalar("loss_epoch", "train_eval", iteration=epoch, value=train_eval["loss"])
-            logger.report_scalar("accuracy_epoch", "train_eval", iteration=epoch, value=train_eval["accuracy"])
-            logger.report_scalar("error_rate_epoch", "train_eval", iteration=epoch, value=train_eval["error_rate"])
-            logger.report_scalar("logit_norm_epoch", "train_eval", iteration=epoch, value=train_eval["logit_norm"])
+            report_scalar_strict(logger, "loss_epoch", "train_eval", epoch, train_eval["loss"])
+            report_scalar_strict(logger, "accuracy_epoch", "train_eval", epoch, train_eval["accuracy"])
+            report_scalar_strict(logger, "error_rate_epoch", "train_eval", epoch, train_eval["error_rate"])
+            report_scalar_strict(logger, "logit_norm_epoch", "train_eval", epoch, train_eval["logit_norm"])
 
         if epoch % int(cfg["logging"]["full_eval_interval"]) == 0 or epoch == 1:
             val_metrics = evaluate(
@@ -775,18 +787,19 @@ def main() -> None:
             )
 
             for split_name, metrics in [("val", val_metrics), ("test", test_metrics)]:
-                logger.report_scalar("loss_epoch", split_name, iteration=epoch, value=metrics["loss"])
-                logger.report_scalar("accuracy_epoch", split_name, iteration=epoch, value=metrics["accuracy"])
-                logger.report_scalar("error_rate_epoch", split_name, iteration=epoch, value=metrics["error_rate"])
-                logger.report_scalar("logit_norm_epoch", split_name, iteration=epoch, value=metrics["logit_norm"])
+                report_scalar_strict(logger, "loss_epoch", split_name, epoch, metrics["loss"])
+                report_scalar_strict(logger, "accuracy_epoch", split_name, epoch, metrics["accuracy"])
+                report_scalar_strict(logger, "error_rate_epoch", split_name, epoch, metrics["error_rate"])
+                report_scalar_strict(logger, "logit_norm_epoch", split_name, epoch, metrics["logit_norm"])
 
             gap = train_acc_epoch - test_metrics["accuracy"]
-            logger.report_scalar("generalization_epoch", "train_minus_test_accuracy", iteration=epoch, value=gap)
-            logger.report_scalar(
+            report_scalar_strict(logger, "generalization_epoch", "train_minus_test_accuracy", epoch, gap)
+            report_scalar_strict(
+                logger,
                 "generalization_epoch",
                 "train_minus_test_loss",
-                iteration=epoch,
-                value=train_loss_epoch - test_metrics["loss"],
+                epoch,
+                train_loss_epoch - test_metrics["loss"],
             )
 
             history["epoch"].append(epoch)
