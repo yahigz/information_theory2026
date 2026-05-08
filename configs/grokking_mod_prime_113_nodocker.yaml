@@ -33,7 +33,7 @@ model:
 
 training:
   device: "auto"
-  epochs: 4000
+  epochs: 2000
   batch_size: 256
   num_workers: 0
   optimizer: "adamw"

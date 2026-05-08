@@ -66,6 +66,20 @@ def bootstrap_training_runtime() -> None:
     ClearMLDataset = _ClearMLDataset
     DataLoader = _DataLoader
     TensorDataset = _TensorDataset
+    # On some platforms (macOS) the default multiprocessing sharing strategy
+    # can leak semaphores. Prefer file_system strategy when possible.
+    try:
+        import torch.multiprocessing as _tmp
+
+        _tmp.set_sharing_strategy("file_system")
+    except Exception:
+        pass
+    try:
+        import multiprocessing as _mp
+
+        _mp.set_start_method("spawn", force=True)
+    except Exception:
+        pass
 
 
 def set_seed(seed: int) -> None:
@@ -641,6 +655,10 @@ def main() -> None:
     best_test_accuracy = -1.0
     global_step = 0
 
+    # directory to save generated plots for upload
+    plots_dir = Path(cfg.get("logging", {}).get("save_dir", "artifacts"))
+    plots_dir.mkdir(parents=True, exist_ok=True)
+
     PRINT_EVERY = int(cfg.get("logging", {}).get("print_interval", 50))
 
     for epoch in range(1, int(cfg["training"]["epochs"]) + 1):
@@ -760,6 +778,13 @@ def main() -> None:
                     iteration=epoch,
                     figure=fig,
                 )
+                # save and upload PNG for easy download from ClearML UI
+                try:
+                    p = plots_dir / f"training_curves_loss_epoch_{epoch:06d}.png"
+                    fig.savefig(p, bbox_inches="tight")
+                    task.upload_artifact(f"plots/training_curves_loss_epoch_{epoch}", artifact_object=str(p))
+                except Exception:
+                    pass
                 plt.close(fig)
 
                 fig = training_curves_figure(history, metric="accuracy")
@@ -769,6 +794,12 @@ def main() -> None:
                     iteration=epoch,
                     figure=fig,
                 )
+                try:
+                    p = plots_dir / f"training_curves_accuracy_epoch_{epoch:06d}.png"
+                    fig.savefig(p, bbox_inches="tight")
+                    task.upload_artifact(f"plots/training_curves_accuracy_epoch_{epoch}", artifact_object=str(p))
+                except Exception:
+                    pass
                 plt.close(fig)
 
                 fig = confusion_figure(num_classes, test_metrics["preds"], test_metrics["targets"])
@@ -778,6 +809,12 @@ def main() -> None:
                     iteration=epoch,
                     figure=fig,
                 )
+                try:
+                    p = plots_dir / f"confusion_matrix_epoch_{epoch:06d}.png"
+                    fig.savefig(p, bbox_inches="tight")
+                    task.upload_artifact(f"plots/confusion_matrix_epoch_{epoch}", artifact_object=str(p))
+                except Exception:
+                    pass
                 plt.close(fig)
 
                 if len(history["epoch"]) > 1:
@@ -788,6 +825,12 @@ def main() -> None:
                         iteration=epoch,
                         figure=fig,
                     )
+                    try:
+                        p = plots_dir / f"accuracy_scatter_epoch_{epoch:06d}.png"
+                        fig.savefig(p, bbox_inches="tight")
+                        task.upload_artifact(f"plots/accuracy_scatter_epoch_{epoch}", artifact_object=str(p))
+                    except Exception:
+                        pass
                     plt.close(fig)
 
             log_predictions_table(
