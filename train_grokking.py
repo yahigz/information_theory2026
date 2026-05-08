@@ -314,12 +314,26 @@ def init_weights(module: nn.Module, init_scale: float) -> None:
             nn.init.zeros_(module.bias)
 
 
-def make_dataloaders(splits: dict[str, SplitData], batch_size: int) -> dict[str, DataLoader]:
+def make_dataloaders(splits: dict[str, SplitData], batch_size: int, num_workers: int = 0) -> dict[str, DataLoader]:
+    """Create DataLoader objects.
+
+    Use `num_workers=0` by default to avoid multiprocessing semaphore leaks
+    on some platforms. Set `pin_memory` when CUDA is available.
+    """
+    pin_memory = False
+    try:
+        pin_memory = bool(torch.cuda.is_available())
+    except Exception:
+        pin_memory = False
+
     return {
         name: DataLoader(
             TensorDataset(split.inputs.long(), split.targets.long()),
             batch_size=batch_size,
             shuffle=(name == "train"),
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            persistent_workers=False,
         )
         for name, split in splits.items()
         if name in {"train", "val", "test"}
@@ -529,6 +543,29 @@ def accuracy_scatter_figure(history: dict[str, list[float]]) -> plt.Figure:
     return fig
 
 
+def training_curves_figure(history: dict[str, list[float]], metric: str) -> plt.Figure:
+    fig, ax = plt.subplots(figsize=(8, 5))
+    if metric == "loss":
+        ax.plot(history["epoch"], history["train_loss"], label="train", linewidth=2)
+        ax.plot(history["epoch"], history["val_loss"], label="val", linewidth=2)
+        ax.plot(history["epoch"], history["test_loss"], label="test", linewidth=2)
+        ax.set_title("Loss curves")
+        ax.set_ylabel("loss")
+    elif metric == "accuracy":
+        ax.plot(history["epoch"], history["train_accuracy"], label="train", linewidth=2)
+        ax.plot(history["epoch"], history["val_accuracy"], label="val", linewidth=2)
+        ax.plot(history["epoch"], history["test_accuracy"], label="test", linewidth=2)
+        ax.set_title("Accuracy curves")
+        ax.set_ylabel("accuracy")
+    else:
+        raise ValueError(f"Unsupported metric for curve plot: {metric}")
+    ax.set_xlabel("epoch")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    fig.tight_layout()
+    return fig
+
+
 def log_predictions_table(
     logger: Any,
     title: str,
@@ -553,29 +590,6 @@ def log_predictions_table(
     logger.report_table(title=title, series="examples", iteration=iteration, table_plot=rows)
 
 
-def save_checkpoint(
-    save_dir: Path,
-    epoch: int,
-    model: nn.Module,
-    optimizer: torch.optim.Optimizer,
-    scheduler: torch.optim.lr_scheduler.LRScheduler | None,
-    cfg: dict[str, Any],
-) -> Path:
-    save_dir.mkdir(parents=True, exist_ok=True)
-    ckpt_path = save_dir / f"checkpoint_epoch_{epoch:06d}.pt"
-    torch.save(
-        {
-            "epoch": epoch,
-            "model_state": model.state_dict(),
-            "optimizer_state": optimizer.state_dict(),
-            "scheduler_state": None if scheduler is None else scheduler.state_dict(),
-            "config": cfg,
-        },
-        ckpt_path,
-    )
-    return ckpt_path
-
-
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=Path, required=True)
@@ -591,23 +605,15 @@ def main() -> None:
     logger = task.get_logger()
     remote_cfg = cfg.get("clearml", {})
     if remote_cfg.get("queue"):
-        # Use Docker image if specified (ensures consistent PyTorch version on remote worker)
-        docker_image = remote_cfg.get("docker_image")
-        if docker_image:
-            task.execute_remotely(
-                queue_name=remote_cfg["queue"],
-                exit_process=True,
-                docker_image=docker_image
-            )
-        else:
-            task.execute_remotely(queue_name=remote_cfg["queue"], exit_process=True)
+        task.execute_remotely(queue_name=remote_cfg["queue"], exit_process=True)
 
     bootstrap_training_runtime()
     set_seed(int(cfg["experiment"]["seed"]))
     device = resolve_device(cfg["training"]["device"])
     splits = load_splits(cfg["data"])
     split_summary = build_split_summary(cfg, splits)
-    loaders = make_dataloaders(splits, batch_size=int(cfg["training"]["batch_size"]))
+    num_workers = int(cfg["training"].get("num_workers", 0))
+    loaders = make_dataloaders(splits, batch_size=int(cfg["training"]["batch_size"]), num_workers=num_workers)
     vocab_size, num_classes = infer_model_vocab_and_classes(cfg, splits)
 
     report_hparams(task, cfg, split_summary, device)
@@ -626,13 +632,16 @@ def main() -> None:
     history: dict[str, list[float]] = {
         "train_accuracy": [],
         "test_accuracy": [],
+        "val_accuracy": [],
+        "train_loss": [],
+        "val_loss": [],
+        "test_loss": [],
         "epoch": [],
     }
     best_test_accuracy = -1.0
     global_step = 0
 
-    save_dir = Path(cfg["logging"]["save_dir"])
-    save_dir.mkdir(parents=True, exist_ok=True)
+    PRINT_EVERY = int(cfg.get("logging", {}).get("print_interval", 50))
 
     for epoch in range(1, int(cfg["training"]["epochs"]) + 1):
         model.train()
@@ -642,6 +651,7 @@ def main() -> None:
         running_count = 0
         last_grad_norm = 0.0
 
+        batch_idx = 0
         for inputs, targets in loaders["train"]:
             inputs = inputs.to(device)
             targets = targets.to(device)
@@ -662,20 +672,32 @@ def main() -> None:
             if scheduler is not None:
                 scheduler.step()
 
+            # per-iteration logging (train loss every step)
+            global_step += 1
+            current_lr = optimizer.param_groups[0]["lr"]
+            try:
+                logger.report_scalar("loss", "train", iteration=global_step, value=loss.item())
+                logger.report_scalar("optimization", "lr", iteration=global_step, value=current_lr)
+            except Exception:
+                pass
+
+            if (global_step % PRINT_EVERY) == 0:
+                print(f"Epoch {epoch} step {global_step} batch {batch_idx} loss={loss.item():.4f} lr={current_lr:.6e}", flush=True)
+
+            batch_idx += 1
             batch_size = targets.size(0)
             running_loss += loss.item() * batch_size
             running_correct += (logits.argmax(dim=-1) == targets).sum().item()
             running_count += batch_size
-            global_step += 1
 
         train_loss_epoch = running_loss / running_count
         train_acc_epoch = running_correct / running_count
         epoch_time = time.time() - epoch_start
         current_lr = optimizer.param_groups[0]["lr"]
 
-        logger.report_scalar("train_epoch", "loss", iteration=epoch, value=train_loss_epoch)
-        logger.report_scalar("train_epoch", "accuracy", iteration=epoch, value=train_acc_epoch)
-        logger.report_scalar("optimization", "lr", iteration=epoch, value=current_lr)
+        logger.report_scalar("loss", "train_epoch", iteration=epoch, value=train_loss_epoch)
+        logger.report_scalar("accuracy", "train_epoch", iteration=epoch, value=train_acc_epoch)
+        logger.report_scalar("optimization", "lr_epoch", iteration=epoch, value=current_lr)
         logger.report_scalar("optimization", "grad_norm", iteration=epoch, value=last_grad_norm)
         logger.report_scalar("optimization", "parameter_norm", iteration=epoch, value=parameter_l2_norm(model))
         logger.report_scalar("optimization", "embedding_norm", iteration=epoch, value=embedding_l2_norm(model))
@@ -688,10 +710,10 @@ def main() -> None:
                 device,
                 label_smoothing=float(cfg["training"]["label_smoothing"]),
             )
-            logger.report_scalar("train_eval", "loss", iteration=epoch, value=train_eval["loss"])
-            logger.report_scalar("train_eval", "accuracy", iteration=epoch, value=train_eval["accuracy"])
-            logger.report_scalar("train_eval", "error_rate", iteration=epoch, value=train_eval["error_rate"])
-            logger.report_scalar("train_eval", "logit_norm", iteration=epoch, value=train_eval["logit_norm"])
+            logger.report_scalar("loss", "train_eval", iteration=epoch, value=train_eval["loss"])
+            logger.report_scalar("accuracy", "train_eval", iteration=epoch, value=train_eval["accuracy"])
+            logger.report_scalar("error_rate", "train_eval", iteration=epoch, value=train_eval["error_rate"])
+            logger.report_scalar("logit_norm", "train_eval", iteration=epoch, value=train_eval["logit_norm"])
 
         if epoch % int(cfg["logging"]["full_eval_interval"]) == 0 or epoch == 1:
             val_metrics = evaluate(
@@ -708,10 +730,10 @@ def main() -> None:
             )
 
             for split_name, metrics in [("val", val_metrics), ("test", test_metrics)]:
-                logger.report_scalar(split_name, "loss", iteration=epoch, value=metrics["loss"])
-                logger.report_scalar(split_name, "accuracy", iteration=epoch, value=metrics["accuracy"])
-                logger.report_scalar(split_name, "error_rate", iteration=epoch, value=metrics["error_rate"])
-                logger.report_scalar(split_name, "logit_norm", iteration=epoch, value=metrics["logit_norm"])
+                logger.report_scalar("loss", split_name, iteration=epoch, value=metrics["loss"])
+                logger.report_scalar("accuracy", split_name, iteration=epoch, value=metrics["accuracy"])
+                logger.report_scalar("error_rate", split_name, iteration=epoch, value=metrics["error_rate"])
+                logger.report_scalar("logit_norm", split_name, iteration=epoch, value=metrics["logit_norm"])
 
             gap = train_acc_epoch - test_metrics["accuracy"]
             logger.report_scalar("generalization", "train_minus_test_accuracy", iteration=epoch, value=gap)
@@ -724,9 +746,31 @@ def main() -> None:
 
             history["epoch"].append(epoch)
             history["train_accuracy"].append(train_acc_epoch)
+            history["train_loss"].append(train_loss_epoch)
+            history["val_accuracy"].append(val_metrics["accuracy"])
+            history["val_loss"].append(val_metrics["loss"])
+            history["test_loss"].append(test_metrics["loss"])
             history["test_accuracy"].append(test_metrics["accuracy"])
 
             if epoch % int(cfg["logging"]["plot_interval"]) == 0 or epoch == 1:
+                fig = training_curves_figure(history, metric="loss")
+                logger.report_matplotlib_figure(
+                    title="training_curves",
+                    series="loss",
+                    iteration=epoch,
+                    figure=fig,
+                )
+                plt.close(fig)
+
+                fig = training_curves_figure(history, metric="accuracy")
+                logger.report_matplotlib_figure(
+                    title="training_curves",
+                    series="accuracy",
+                    iteration=epoch,
+                    figure=fig,
+                )
+                plt.close(fig)
+
                 fig = confusion_figure(num_classes, test_metrics["preds"], test_metrics["targets"])
                 logger.report_matplotlib_figure(
                     title="confusion_matrix",
@@ -758,8 +802,6 @@ def main() -> None:
 
             if test_metrics["accuracy"] > best_test_accuracy:
                 best_test_accuracy = test_metrics["accuracy"]
-                best_path = save_checkpoint(save_dir, epoch, model, optimizer, scheduler, cfg)
-                task.upload_artifact("best_checkpoint", artifact_object=str(best_path))
 
         if epoch % int(cfg["logging"]["histogram_interval"]) == 0 or epoch == 1:
             for name, param in model.named_parameters():
@@ -772,9 +814,7 @@ def main() -> None:
                     yaxis="count",
                 )
 
-        if epoch % int(cfg["logging"]["checkpoint_interval"]) == 0:
-            ckpt_path = save_checkpoint(save_dir, epoch, model, optimizer, scheduler, cfg)
-            task.upload_artifact(f"checkpoint_epoch_{epoch}", artifact_object=str(ckpt_path))
+        # checkpoint saving disabled by user request (only logging/plots are kept)
 
     final_test = evaluate(
         model,
