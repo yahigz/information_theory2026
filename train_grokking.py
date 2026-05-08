@@ -580,6 +580,33 @@ def training_curves_figure(history: dict[str, list[float]], metric: str) -> plt.
     return fig
 
 
+def history_overview_figure(history: dict[str, list[float]]) -> plt.Figure:
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    ax_loss, ax_acc = axes
+
+    ax_loss.plot(history["epoch"], history["train_loss"], label="train", linewidth=2)
+    ax_loss.plot(history["epoch"], history["val_loss"], label="val", linewidth=2)
+    ax_loss.plot(history["epoch"], history["test_loss"], label="test", linewidth=2)
+    ax_loss.set_title("Loss")
+    ax_loss.set_xlabel("epoch")
+    ax_loss.set_ylabel("loss")
+    ax_loss.grid(True, alpha=0.3)
+    ax_loss.legend()
+
+    ax_acc.plot(history["epoch"], history["train_accuracy"], label="train", linewidth=2)
+    ax_acc.plot(history["epoch"], history["val_accuracy"], label="val", linewidth=2)
+    ax_acc.plot(history["epoch"], history["test_accuracy"], label="test", linewidth=2)
+    ax_acc.set_title("Accuracy")
+    ax_acc.set_xlabel("epoch")
+    ax_acc.set_ylabel("accuracy")
+    ax_acc.grid(True, alpha=0.3)
+    ax_acc.legend()
+
+    fig.suptitle("Training history overview")
+    fig.tight_layout()
+    return fig
+
+
 def log_predictions_table(
     logger: Any,
     title: str,
@@ -713,13 +740,13 @@ def main() -> None:
         epoch_time = time.time() - epoch_start
         current_lr = optimizer.param_groups[0]["lr"]
 
-        logger.report_scalar("loss", "train_epoch", iteration=epoch, value=train_loss_epoch)
-        logger.report_scalar("accuracy", "train_epoch", iteration=epoch, value=train_acc_epoch)
-        logger.report_scalar("optimization", "lr_epoch", iteration=epoch, value=current_lr)
-        logger.report_scalar("optimization", "grad_norm", iteration=epoch, value=last_grad_norm)
-        logger.report_scalar("optimization", "parameter_norm", iteration=epoch, value=parameter_l2_norm(model))
-        logger.report_scalar("optimization", "embedding_norm", iteration=epoch, value=embedding_l2_norm(model))
-        logger.report_scalar("runtime", "epoch_seconds", iteration=epoch, value=epoch_time)
+        logger.report_scalar("loss_epoch", "train", iteration=epoch, value=train_loss_epoch)
+        logger.report_scalar("accuracy_epoch", "train", iteration=epoch, value=train_acc_epoch)
+        logger.report_scalar("optimization_epoch", "lr", iteration=epoch, value=current_lr)
+        logger.report_scalar("optimization_epoch", "grad_norm", iteration=epoch, value=last_grad_norm)
+        logger.report_scalar("optimization_epoch", "parameter_norm", iteration=epoch, value=parameter_l2_norm(model))
+        logger.report_scalar("optimization_epoch", "embedding_norm", iteration=epoch, value=embedding_l2_norm(model))
+        logger.report_scalar("runtime_epoch", "seconds", iteration=epoch, value=epoch_time)
 
         if epoch % int(cfg["logging"]["train_eval_interval"]) == 0 or epoch == 1:
             train_eval = evaluate(
@@ -728,10 +755,10 @@ def main() -> None:
                 device,
                 label_smoothing=float(cfg["training"]["label_smoothing"]),
             )
-            logger.report_scalar("loss", "train_eval", iteration=epoch, value=train_eval["loss"])
-            logger.report_scalar("accuracy", "train_eval", iteration=epoch, value=train_eval["accuracy"])
-            logger.report_scalar("error_rate", "train_eval", iteration=epoch, value=train_eval["error_rate"])
-            logger.report_scalar("logit_norm", "train_eval", iteration=epoch, value=train_eval["logit_norm"])
+            logger.report_scalar("loss_epoch", "train_eval", iteration=epoch, value=train_eval["loss"])
+            logger.report_scalar("accuracy_epoch", "train_eval", iteration=epoch, value=train_eval["accuracy"])
+            logger.report_scalar("error_rate_epoch", "train_eval", iteration=epoch, value=train_eval["error_rate"])
+            logger.report_scalar("logit_norm_epoch", "train_eval", iteration=epoch, value=train_eval["logit_norm"])
 
         if epoch % int(cfg["logging"]["full_eval_interval"]) == 0 or epoch == 1:
             val_metrics = evaluate(
@@ -748,15 +775,15 @@ def main() -> None:
             )
 
             for split_name, metrics in [("val", val_metrics), ("test", test_metrics)]:
-                logger.report_scalar("loss", split_name, iteration=epoch, value=metrics["loss"])
-                logger.report_scalar("accuracy", split_name, iteration=epoch, value=metrics["accuracy"])
-                logger.report_scalar("error_rate", split_name, iteration=epoch, value=metrics["error_rate"])
-                logger.report_scalar("logit_norm", split_name, iteration=epoch, value=metrics["logit_norm"])
+                logger.report_scalar("loss_epoch", split_name, iteration=epoch, value=metrics["loss"])
+                logger.report_scalar("accuracy_epoch", split_name, iteration=epoch, value=metrics["accuracy"])
+                logger.report_scalar("error_rate_epoch", split_name, iteration=epoch, value=metrics["error_rate"])
+                logger.report_scalar("logit_norm_epoch", split_name, iteration=epoch, value=metrics["logit_norm"])
 
             gap = train_acc_epoch - test_metrics["accuracy"]
-            logger.report_scalar("generalization", "train_minus_test_accuracy", iteration=epoch, value=gap)
+            logger.report_scalar("generalization_epoch", "train_minus_test_accuracy", iteration=epoch, value=gap)
             logger.report_scalar(
-                "generalization",
+                "generalization_epoch",
                 "train_minus_test_loss",
                 iteration=epoch,
                 value=train_loss_epoch - test_metrics["loss"],
@@ -873,6 +900,25 @@ def main() -> None:
     }
     report_text_block(logger, "Final summary", yaml.safe_dump(final_summary, sort_keys=False))
     task.upload_artifact("final_summary", artifact_object=final_summary)
+
+    if history["epoch"]:
+        final_history_fig = history_overview_figure(history)
+        try:
+            logger.report_matplotlib_figure(
+                title="training_curves",
+                series="history_overview_final",
+                iteration=history["epoch"][-1],
+                figure=final_history_fig,
+            )
+        except Exception:
+            pass
+        try:
+            final_history_path = plots_dir / "history_overview_final.png"
+            final_history_fig.savefig(final_history_path, bbox_inches="tight")
+            task.upload_artifact("plots/history_overview_final", artifact_object=str(final_history_path))
+        except Exception:
+            pass
+        plt.close(final_history_fig)
 
 
 if __name__ == "__main__":
