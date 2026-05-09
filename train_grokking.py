@@ -759,6 +759,7 @@ def main() -> None:
         "generalization_loss_gap": [],
     }
     best_test_accuracy = -1.0
+    progress_print_interval = int(cfg.get("logging", {}).get("progress_print_interval", 10))
 
     for epoch in range(1, int(cfg["training"]["epochs"]) + 1):
         model.train()
@@ -871,6 +872,23 @@ def main() -> None:
 
         if test_metrics["accuracy"] > best_test_accuracy:
             best_test_accuracy = test_metrics["accuracy"]
+
+        if epoch == 1 or epoch % progress_print_interval == 0 or epoch == int(cfg["training"]["epochs"]):
+            val_accuracy = val_metrics["accuracy"]
+            test_accuracy = test_metrics["accuracy"]
+            print(
+                "Epoch {epoch}/{total} | train_loss={train_loss:.6f} | train_acc={train_acc:.4f} | "
+                "val_acc={val_acc} | test_acc={test_acc} | best_test_acc={best_test:.4f}".format(
+                    epoch=epoch,
+                    total=int(cfg["training"]["epochs"]),
+                    train_loss=train_loss_epoch,
+                    train_acc=train_acc_epoch,
+                    val_acc=f"{val_accuracy:.4f}" if math.isfinite(val_accuracy) else "nan",
+                    test_acc=f"{test_accuracy:.4f}" if math.isfinite(test_accuracy) else "nan",
+                    best_test=best_test_accuracy,
+                ),
+                flush=True,
+            )
 
     final_test = evaluate(
         model,
