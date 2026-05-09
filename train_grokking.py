@@ -479,7 +479,10 @@ def report_scalar_strict(
     iteration: int,
     value: float,
 ) -> None:
-    # Enforce numeric monotonic-style reporting expected by ClearML charts.
+    """Report scalar with strict type and finiteness checks to ClearML.
+    
+    Enforces proper iteration tracking by validating types and values.
+    """
     v = float(value)
     if not math.isfinite(v):
         return
@@ -724,7 +727,6 @@ def main() -> None:
     plots_dir.mkdir(parents=True, exist_ok=True)
 
     PRINT_EVERY = int(cfg.get("logging", {}).get("print_interval", 50))
-    FLUSH_EVERY = int(cfg.get("logging", {}).get("flush_interval", 100))
 
     for epoch in range(1, int(cfg["training"]["epochs"]) + 1):
         model.train()
@@ -763,13 +765,6 @@ def main() -> None:
 
             if (global_step % PRINT_EVERY) == 0:
                 print(f"Epoch {epoch} step {global_step} batch {batch_idx} loss={loss.item():.4f} lr={current_lr:.6e}", flush=True)
-
-            # Periodically flush scalars to ensure they reach ClearML server in real-time
-            if (global_step % FLUSH_EVERY) == 0:
-                try:
-                    task.flush(wait_for_uploads=False)
-                except Exception:
-                    pass
 
             batch_idx += 1
             batch_size = targets.size(0)
@@ -981,12 +976,12 @@ def main() -> None:
 
     # Block until uploads finish so process doesn't exit before backend receives artifacts
     try:
-        logger.report_text("Flushing ClearML uploads and waiting for completion...")
-        task.flush(wait_for_uploads=True)
-        logger.report_text("ClearML flush completed")
+        logger.report_text("Flushing ClearML logger and waiting for uploads...")
+        logger.flush(wait=True)
+        logger.report_text("ClearML logger flush completed")
     except Exception as ex:
         try:
-            logger.report_text(f"ClearML flush failed: {ex}")
+            logger.report_text(f"ClearML logger flush failed: {ex}")
         except Exception:
             pass
     try:
