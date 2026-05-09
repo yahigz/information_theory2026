@@ -486,6 +486,28 @@ def report_scalar_strict(
     logger.report_scalar(title=title, series=series, iteration=int(iteration), value=v)
 
 
+def upload_file_with_retries(task: Task, logger: Any, name: str, path: Path, max_retries: int = 5) -> bool:
+    """Upload file at `path` as artifact `name` with retries and exponential backoff.
+
+    Returns True on success, False on failure.
+    """
+    if not path.exists():
+        logger.report_text(f"upload_file_with_retries: file not found {path}")
+        return False
+    delay = 1.0
+    for attempt in range(1, max_retries + 1):
+        try:
+            task.upload_artifact(name, artifact_object=str(path))
+            logger.report_text(f"uploaded artifact {name} -> {path} (attempt {attempt})")
+            return True
+        except Exception as ex:
+            logger.report_text(f"artifact upload failed {name} attempt {attempt}: {ex}")
+            time.sleep(delay)
+            delay = min(delay * 2, 30.0)
+    logger.report_text(f"artifact upload finally failed for {name}")
+    return False
+
+
 def build_split_summary(cfg: dict[str, Any], splits: dict[str, SplitData]) -> dict[str, Any]:
     source_mode = cfg["data"].get("source", {}).get("mode", "generated")
     total = int(splits["all"].targets.numel())
@@ -702,6 +724,7 @@ def main() -> None:
     plots_dir.mkdir(parents=True, exist_ok=True)
 
     PRINT_EVERY = int(cfg.get("logging", {}).get("print_interval", 50))
+    FLUSH_EVERY = int(cfg.get("logging", {}).get("flush_interval", 100))
 
     for epoch in range(1, int(cfg["training"]["epochs"]) + 1):
         model.train()
@@ -740,6 +763,13 @@ def main() -> None:
 
             if (global_step % PRINT_EVERY) == 0:
                 print(f"Epoch {epoch} step {global_step} batch {batch_idx} loss={loss.item():.4f} lr={current_lr:.6e}", flush=True)
+
+            # Periodically flush scalars to ensure they reach ClearML server in real-time
+            if (global_step % FLUSH_EVERY) == 0:
+                try:
+                    task.flush(wait_for_uploads=False)
+                except Exception:
+                    pass
 
             batch_idx += 1
             batch_size = targets.size(0)
@@ -818,11 +848,10 @@ def main() -> None:
                     iteration=epoch,
                     figure=fig,
                 )
-                # save and upload PNG for easy download from ClearML UI
+                # save PNG locally; upload only if configured to avoid many small network calls
+                p = plots_dir / f"training_curves_loss_epoch_{epoch:06d}.png"
                 try:
-                    p = plots_dir / f"training_curves_loss_epoch_{epoch:06d}.png"
                     fig.savefig(p, bbox_inches="tight")
-                    task.upload_artifact(f"plots/training_curves_loss_epoch_{epoch}", artifact_object=str(p))
                 except Exception:
                     pass
                 plt.close(fig)
@@ -834,10 +863,9 @@ def main() -> None:
                     iteration=epoch,
                     figure=fig,
                 )
+                p = plots_dir / f"training_curves_accuracy_epoch_{epoch:06d}.png"
                 try:
-                    p = plots_dir / f"training_curves_accuracy_epoch_{epoch:06d}.png"
                     fig.savefig(p, bbox_inches="tight")
-                    task.upload_artifact(f"plots/training_curves_accuracy_epoch_{epoch}", artifact_object=str(p))
                 except Exception:
                     pass
                 plt.close(fig)
@@ -849,10 +877,9 @@ def main() -> None:
                     iteration=epoch,
                     figure=fig,
                 )
+                p = plots_dir / f"confusion_matrix_epoch_{epoch:06d}.png"
                 try:
-                    p = plots_dir / f"confusion_matrix_epoch_{epoch:06d}.png"
                     fig.savefig(p, bbox_inches="tight")
-                    task.upload_artifact(f"plots/confusion_matrix_epoch_{epoch}", artifact_object=str(p))
                 except Exception:
                     pass
                 plt.close(fig)
@@ -865,10 +892,9 @@ def main() -> None:
                         iteration=epoch,
                         figure=fig,
                     )
+                    p = plots_dir / f"accuracy_scatter_epoch_{epoch:06d}.png"
                     try:
-                        p = plots_dir / f"accuracy_scatter_epoch_{epoch:06d}.png"
                         fig.savefig(p, bbox_inches="tight")
-                        task.upload_artifact(f"plots/accuracy_scatter_epoch_{epoch}", artifact_object=str(p))
                     except Exception:
                         pass
                     plt.close(fig)
@@ -911,9 +937,20 @@ def main() -> None:
         "final_test_loss": final_test["loss"],
         "final_parameter_norm": parameter_l2_norm(model),
     }
-    report_text_block(logger, "Final summary", yaml.safe_dump(final_summary, sort_keys=False))
-    task.upload_artifact("final_summary", artifact_object=final_summary)
+    # Save final summary to file then upload with retries
+    final_summary_path = plots_dir / "final_summary.yaml"
+    try:
+        with final_summary_path.open("w", encoding="utf-8") as fh:
+            yaml.safe_dump(final_summary, fh, sort_keys=False)
+    except Exception:
+        pass
+    # try to upload final summary with retries (this avoids direct large dict upload which can timeout)
+    try:
+        upload_file_with_retries(task, logger, "final_summary", final_summary_path)
+    except Exception:
+        pass
 
+    # Final history figure: report to ClearML and upload single final PNG (downloadable from UI)
     if history["epoch"]:
         final_history_fig = history_overview_figure(history)
         try:
@@ -928,10 +965,34 @@ def main() -> None:
         try:
             final_history_path = plots_dir / "history_overview_final.png"
             final_history_fig.savefig(final_history_path, bbox_inches="tight")
-            task.upload_artifact("plots/history_overview_final", artifact_object=str(final_history_path))
+            # Use simple artifact name without slashes (ClearML URL-encodes slashes causing broken links)
+            upload_file_with_retries(task, logger, "history_overview_final.png", final_history_path)
         except Exception:
             pass
         plt.close(final_history_fig)
+
+    # Upload all saved PNG files as downloadable artifacts
+    try:
+        for png_file in sorted(plots_dir.glob("*.png")):
+            artifact_name = png_file.name  # Use filename directly, no paths
+            upload_file_with_retries(task, logger, artifact_name, png_file, max_retries=3)
+    except Exception:
+        pass
+
+    # Block until uploads finish so process doesn't exit before backend receives artifacts
+    try:
+        logger.report_text("Flushing ClearML uploads and waiting for completion...")
+        task.flush(wait_for_uploads=True)
+        logger.report_text("ClearML flush completed")
+    except Exception as ex:
+        try:
+            logger.report_text(f"ClearML flush failed: {ex}")
+        except Exception:
+            pass
+    try:
+        task.close()
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":
