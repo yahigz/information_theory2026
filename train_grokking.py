@@ -670,6 +670,34 @@ def log_predictions_table(
     logger.report_table(title=title, series="examples", iteration=iteration, table_plot=rows)
 
 
+HISTORY_BLOCK_BEGIN = "=== HISTORY_BLOCK_BEGIN ==="
+HISTORY_BLOCK_END = "=== HISTORY_BLOCK_END ==="
+
+
+def history_snapshot(history: dict[str, list[float]]) -> dict[str, list[float]]:
+    snapshot: dict[str, list[float]] = {}
+    for key, value in history.items():
+        snapshot[key] = list(value)
+    return snapshot
+
+
+def emit_history_block(
+    history: dict[str, list[float]],
+    epoch: int,
+    final: bool = False,
+    summary: dict[str, Any] | None = None,
+) -> None:
+    payload: dict[str, Any] = {
+        "epoch": int(epoch),
+        "final": bool(final),
+        "history": history_snapshot(history),
+    }
+    if summary is not None:
+        payload["summary"] = summary
+    block = yaml.safe_dump(payload, sort_keys=False, default_flow_style=False).rstrip()
+    print(f"{HISTORY_BLOCK_BEGIN}\n{block}\n{HISTORY_BLOCK_END}", flush=True)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=Path, required=True)
@@ -698,10 +726,6 @@ def main() -> None:
     vocab_size, num_classes = infer_model_vocab_and_classes(cfg, splits)
 
     report_hparams(task, cfg, split_summary, device)
-    report_text_block(logger, "Split summary", yaml.safe_dump(split_summary, sort_keys=False))
-    report_text_block(logger, "Config", yaml.safe_dump(cfg, sort_keys=False))
-    report_text_block(logger, "Runtime summary", yaml.safe_dump(build_runtime_summary(device), sort_keys=False))
-    report_text_block(logger, "Dependency summary", yaml.safe_dump(build_dependency_summary(), sort_keys=False))
 
     model = SmallTransformer(vocab_size=vocab_size, num_classes=num_classes, **cfg["model"]).to(device)
     model.apply(lambda module: init_weights(module, float(cfg["training"]["init_scale"])))
@@ -711,22 +735,30 @@ def main() -> None:
     scheduler = build_scheduler(optimizer, cfg["training"], total_steps=total_steps)
 
     history: dict[str, list[float]] = {
-        "train_accuracy": [],
-        "test_accuracy": [],
-        "val_accuracy": [],
-        "train_loss": [],
-        "val_loss": [],
-        "test_loss": [],
         "epoch": [],
+        "train_loss": [],
+        "train_accuracy": [],
+        "train_eval_loss": [],
+        "train_eval_accuracy": [],
+        "train_eval_error_rate": [],
+        "train_eval_logit_norm": [],
+        "val_loss": [],
+        "val_accuracy": [],
+        "val_error_rate": [],
+        "val_logit_norm": [],
+        "test_loss": [],
+        "test_accuracy": [],
+        "test_error_rate": [],
+        "test_logit_norm": [],
+        "learning_rate": [],
+        "grad_norm": [],
+        "parameter_norm": [],
+        "embedding_norm": [],
+        "epoch_seconds": [],
+        "generalization_accuracy_gap": [],
+        "generalization_loss_gap": [],
     }
     best_test_accuracy = -1.0
-    global_step = 0
-
-    # directory to save generated plots for upload
-    plots_dir = Path(cfg.get("logging", {}).get("save_dir", "artifacts"))
-    plots_dir.mkdir(parents=True, exist_ok=True)
-
-    PRINT_EVERY = int(cfg.get("logging", {}).get("print_interval", 50))
 
     for epoch in range(1, int(cfg["training"]["epochs"]) + 1):
         model.train()
@@ -758,32 +790,8 @@ def main() -> None:
                 scheduler.step()
 
             # per-iteration logging (train loss every step)
-            global_step += 1
-            current_lr = optimizer.param_groups[0]["lr"]
-            report_scalar_strict(logger, "loss_step", "train", global_step, loss.item())
-            report_scalar_strict(logger, "optimization_step", "lr", global_step, current_lr)
-
-            if (global_step % PRINT_EVERY) == 0:
-                print(f"Epoch {epoch} step {global_step} batch {batch_idx} loss={loss.item():.4f} lr={current_lr:.6e}", flush=True)
-
-            batch_idx += 1
-            batch_size = targets.size(0)
-            running_loss += loss.item() * batch_size
-            running_correct += (logits.argmax(dim=-1) == targets).sum().item()
-            running_count += batch_size
-
-        train_loss_epoch = running_loss / running_count
-        train_acc_epoch = running_correct / running_count
         epoch_time = time.time() - epoch_start
         current_lr = optimizer.param_groups[0]["lr"]
-
-        report_scalar_strict(logger, "loss_epoch", "train", epoch, train_loss_epoch)
-        report_scalar_strict(logger, "accuracy_epoch", "train", epoch, train_acc_epoch)
-        report_scalar_strict(logger, "optimization_epoch", "lr", epoch, current_lr)
-        report_scalar_strict(logger, "optimization_epoch", "grad_norm", epoch, last_grad_norm)
-        report_scalar_strict(logger, "optimization_epoch", "parameter_norm", epoch, parameter_l2_norm(model))
-        report_scalar_strict(logger, "optimization_epoch", "embedding_norm", epoch, embedding_l2_norm(model))
-        report_scalar_strict(logger, "runtime_epoch", "seconds", epoch, epoch_time)
 
         if epoch % int(cfg["logging"]["train_eval_interval"]) == 0 or epoch == 1:
             train_eval = evaluate(
@@ -792,10 +800,13 @@ def main() -> None:
                 device,
                 label_smoothing=float(cfg["training"]["label_smoothing"]),
             )
-            report_scalar_strict(logger, "loss_epoch", "train_eval", epoch, train_eval["loss"])
-            report_scalar_strict(logger, "accuracy_epoch", "train_eval", epoch, train_eval["accuracy"])
-            report_scalar_strict(logger, "error_rate_epoch", "train_eval", epoch, train_eval["error_rate"])
-            report_scalar_strict(logger, "logit_norm_epoch", "train_eval", epoch, train_eval["logit_norm"])
+        else:
+            train_eval = {
+                "loss": train_loss_epoch,
+                "accuracy": train_acc_epoch,
+                "error_rate": 1.0 - train_acc_epoch,
+                "logit_norm": float("nan"),
+            }
 
         if epoch % int(cfg["logging"]["full_eval_interval"]) == 0 or epoch == 1:
             val_metrics = evaluate(
@@ -810,115 +821,49 @@ def main() -> None:
                 device,
                 label_smoothing=float(cfg["training"]["label_smoothing"]),
             )
+        else:
+            val_metrics = {
+                "loss": float("nan"),
+                "accuracy": float("nan"),
+                "error_rate": float("nan"),
+                "logit_norm": float("nan"),
+            }
+            test_metrics = {
+                "loss": float("nan"),
+                "accuracy": float("nan"),
+                "error_rate": float("nan"),
+                "logit_norm": float("nan"),
+            }
 
-            for split_name, metrics in [("val", val_metrics), ("test", test_metrics)]:
-                report_scalar_strict(logger, "loss_epoch", split_name, epoch, metrics["loss"])
-                report_scalar_strict(logger, "accuracy_epoch", split_name, epoch, metrics["accuracy"])
-                report_scalar_strict(logger, "error_rate_epoch", split_name, epoch, metrics["error_rate"])
-                report_scalar_strict(logger, "logit_norm_epoch", split_name, epoch, metrics["logit_norm"])
+        gap = train_acc_epoch - test_metrics["accuracy"] if math.isfinite(test_metrics["accuracy"]) else float("nan")
 
-            gap = train_acc_epoch - test_metrics["accuracy"]
-            report_scalar_strict(logger, "generalization_epoch", "train_minus_test_accuracy", epoch, gap)
-            report_scalar_strict(
-                logger,
-                "generalization_epoch",
-                "train_minus_test_loss",
-                epoch,
-                train_loss_epoch - test_metrics["loss"],
-            )
+        history["epoch"].append(epoch)
+        history["train_loss"].append(train_loss_epoch)
+        history["train_accuracy"].append(train_acc_epoch)
+        history["train_eval_loss"].append(float(train_eval["loss"]))
+        history["train_eval_accuracy"].append(float(train_eval["accuracy"]))
+        history["train_eval_error_rate"].append(float(train_eval["error_rate"]))
+        history["train_eval_logit_norm"].append(float(train_eval["logit_norm"]))
+        history["val_loss"].append(float(val_metrics["loss"]))
+        history["val_accuracy"].append(float(val_metrics["accuracy"]))
+        history["val_error_rate"].append(float(val_metrics["error_rate"]))
+        history["val_logit_norm"].append(float(val_metrics["logit_norm"]))
+        history["test_loss"].append(float(test_metrics["loss"]))
+        history["test_accuracy"].append(float(test_metrics["accuracy"]))
+        history["test_error_rate"].append(float(test_metrics["error_rate"]))
+        history["test_logit_norm"].append(float(test_metrics["logit_norm"]))
+        history["learning_rate"].append(current_lr)
+        history["grad_norm"].append(last_grad_norm)
+        history["parameter_norm"].append(parameter_l2_norm(model))
+        history["embedding_norm"].append(embedding_l2_norm(model))
+        history["epoch_seconds"].append(epoch_time)
+        history["generalization_accuracy_gap"].append(gap)
+        history["generalization_loss_gap"].append(
+            train_loss_epoch - test_metrics["loss"] if math.isfinite(test_metrics["loss"]) else float("nan")
+        )
 
-            history["epoch"].append(epoch)
-            history["train_accuracy"].append(train_acc_epoch)
-            history["train_loss"].append(train_loss_epoch)
-            history["val_accuracy"].append(val_metrics["accuracy"])
-            history["val_loss"].append(val_metrics["loss"])
-            history["test_loss"].append(test_metrics["loss"])
-            history["test_accuracy"].append(test_metrics["accuracy"])
-
-            if epoch % int(cfg["logging"]["plot_interval"]) == 0 or epoch == 1:
-                fig = training_curves_figure(history, metric="loss")
-                logger.report_matplotlib_figure(
-                    title="training_curves",
-                    series="loss",
-                    iteration=epoch,
-                    figure=fig,
-                )
-                # save PNG locally; upload only if configured to avoid many small network calls
-                p = plots_dir / f"training_curves_loss_epoch_{epoch:06d}.png"
-                try:
-                    fig.savefig(p, bbox_inches="tight")
-                except Exception:
-                    pass
-                plt.close(fig)
-
-                fig = training_curves_figure(history, metric="accuracy")
-                logger.report_matplotlib_figure(
-                    title="training_curves",
-                    series="accuracy",
-                    iteration=epoch,
-                    figure=fig,
-                )
-                p = plots_dir / f"training_curves_accuracy_epoch_{epoch:06d}.png"
-                try:
-                    fig.savefig(p, bbox_inches="tight")
-                except Exception:
-                    pass
-                plt.close(fig)
-
-                fig = confusion_figure(num_classes, test_metrics["preds"], test_metrics["targets"])
-                logger.report_matplotlib_figure(
-                    title="confusion_matrix",
-                    series="test",
-                    iteration=epoch,
-                    figure=fig,
-                )
-                p = plots_dir / f"confusion_matrix_epoch_{epoch:06d}.png"
-                try:
-                    fig.savefig(p, bbox_inches="tight")
-                except Exception:
-                    pass
-                plt.close(fig)
-
-                if len(history["epoch"]) > 1:
-                    fig = accuracy_scatter_figure(history)
-                    logger.report_matplotlib_figure(
-                        title="accuracy_scatter",
-                        series="train_vs_test",
-                        iteration=epoch,
-                        figure=fig,
-                    )
-                    p = plots_dir / f"accuracy_scatter_epoch_{epoch:06d}.png"
-                    try:
-                        fig.savefig(p, bbox_inches="tight")
-                    except Exception:
-                        pass
-                    plt.close(fig)
-
-            log_predictions_table(
-                logger,
-                title="sample_predictions",
-                iteration=epoch,
-                inputs=test_metrics["inputs"],
-                targets=test_metrics["targets"],
-                preds=test_metrics["preds"],
-                max_rows=int(cfg["logging"]["sample_predictions"]),
-            )
-
-            if test_metrics["accuracy"] > best_test_accuracy:
-                best_test_accuracy = test_metrics["accuracy"]
-
-        if epoch % int(cfg["logging"]["histogram_interval"]) == 0 or epoch == 1:
-            for name, param in model.named_parameters():
-                logger.report_histogram(
-                    title="weights",
-                    series=name,
-                    iteration=epoch,
-                    values=param.detach().float().cpu().view(-1).numpy(),
-                    xaxis="value",
-                    yaxis="count",
-                )
-
-        # checkpoint saving disabled by user request (only logging/plots are kept)
+        if test_metrics["accuracy"] > best_test_accuracy:
+            best_test_accuracy = test_metrics["accuracy"]
 
     final_test = evaluate(
         model,
@@ -932,58 +877,15 @@ def main() -> None:
         "final_test_loss": final_test["loss"],
         "final_parameter_norm": parameter_l2_norm(model),
     }
-    # Save final summary to file then upload with retries
-    final_summary_path = plots_dir / "final_summary.yaml"
-    try:
-        with final_summary_path.open("w", encoding="utf-8") as fh:
-            yaml.safe_dump(final_summary, fh, sort_keys=False)
-    except Exception:
-        pass
-    # try to upload final summary with retries (this avoids direct large dict upload which can timeout)
-    try:
-        upload_file_with_retries(task, logger, "final_summary", final_summary_path)
-    except Exception:
-        pass
-
-    # Final history figure: report to ClearML and upload single final PNG (downloadable from UI)
-    if history["epoch"]:
-        final_history_fig = history_overview_figure(history)
-        try:
-            logger.report_matplotlib_figure(
-                title="training_curves",
-                series="history_overview_final",
-                iteration=history["epoch"][-1],
-                figure=final_history_fig,
-            )
-        except Exception:
-            pass
-        try:
-            final_history_path = plots_dir / "history_overview_final.png"
-            final_history_fig.savefig(final_history_path, bbox_inches="tight")
-            # Use simple artifact name without slashes (ClearML URL-encodes slashes causing broken links)
-            upload_file_with_retries(task, logger, "history_overview_final.png", final_history_path)
-        except Exception:
-            pass
-        plt.close(final_history_fig)
-
-    # Upload all saved PNG files as downloadable artifacts
-    try:
-        for png_file in sorted(plots_dir.glob("*.png")):
-            artifact_name = png_file.name  # Use filename directly, no paths
-            upload_file_with_retries(task, logger, artifact_name, png_file, max_retries=3)
-    except Exception:
-        pass
+    if not history["epoch"] or history["epoch"][-1] != int(cfg["training"]["epochs"]):
+        history["epoch"].append(int(cfg["training"]["epochs"]))
+    emit_history_block(history, int(cfg["training"]["epochs"]), final=True, summary=final_summary)
 
     # Block until uploads finish so process doesn't exit before backend receives artifacts
     try:
-        logger.report_text("Flushing ClearML logger and waiting for uploads...")
         logger.flush(wait=True)
-        logger.report_text("ClearML logger flush completed")
     except Exception as ex:
-        try:
-            logger.report_text(f"ClearML logger flush failed: {ex}")
-        except Exception:
-            pass
+        print(f"ClearML logger flush failed: {ex}", flush=True)
     try:
         task.close()
     except Exception:

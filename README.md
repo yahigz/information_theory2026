@@ -83,16 +83,24 @@ data:
 
 ## Что логируется в ClearML
 
-- `loss`, `accuracy`, `error_rate` для train/val/test
-- `generalization_gap`
-- `parameter_norm`, `embedding_norm`, `logit_norm`, `grad_norm`
-- learning rate и время эпохи
-- гистограммы весов
-- confusion matrix на test
-- scatter train vs test accuracy
-- таблица с примерами предсказаний
-- копия итогового конфига
-- локальные checkpoints в `artifacts/`
+- вместо большого числа scalars/plots в ClearML скрипт печатает один YAML-блок `history` только в самом конце обучения
+- блок обрамлен маркерами `=== HISTORY_BLOCK_BEGIN ===` / `=== HISTORY_BLOCK_END ===`
+- внутри блока лежит весь накопленный `history` и финальный `summary`
+
+## Как строить графики из worker log
+
+Скачайте worker log из ClearML и запустите:
+
+```bash
+python plot_history_from_worker_log.py /path/to/worker.log
+```
+
+Скрипт создаст папку рядом с логом и сохранит:
+
+- `history_loss.png`
+- `history_accuracy.png`
+- `history_overview.png`
+- `history_extracted.yaml`
 
 ## Рекомендации для гроккинга
 
