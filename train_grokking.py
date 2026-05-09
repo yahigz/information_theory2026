@@ -789,7 +789,14 @@ def main() -> None:
             if scheduler is not None:
                 scheduler.step()
 
-            # per-iteration logging (train loss every step)
+            batch_idx += 1
+            batch_size = targets.size(0)
+            running_loss += loss.item() * batch_size
+            running_correct += (logits.argmax(dim=-1) == targets).sum().item()
+            running_count += batch_size
+
+        train_loss_epoch = running_loss / running_count
+        train_acc_epoch = running_correct / running_count
         epoch_time = time.time() - epoch_start
         current_lr = optimizer.param_groups[0]["lr"]
 
