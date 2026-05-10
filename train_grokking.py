@@ -902,6 +902,34 @@ def main() -> None:
         "final_test_loss": final_test["loss"],
         "final_parameter_norm": parameter_l2_norm(model),
     }
+    # Save model checkpoint locally and report its path
+    try:
+        artifacts_dir = Path(cfg.get("logging", {}).get("save_dir", "artifacts"))
+        models_dir = artifacts_dir / "models"
+        models_dir.mkdir(parents=True, exist_ok=True)
+        ckpt_path = models_dir / f"checkpoint_epoch_{int(cfg['training']['epochs']):06d}.pt"
+        torch.save(
+            {
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "epoch": int(cfg["training"]["epochs"]),
+                "cfg": cfg,
+            },
+            ckpt_path,
+        )
+        msg = f"Saved model checkpoint to {ckpt_path}"
+        print(msg, flush=True)
+        try:
+            logger.report_text(msg)
+        except Exception:
+            pass
+    except Exception as ex:
+        print(f"Failed to save model checkpoint: {ex}", flush=True)
+        try:
+            logger.report_text(f"Failed to save model checkpoint: {ex}")
+        except Exception:
+            pass
+
     if not history["epoch"] or history["epoch"][-1] != int(cfg["training"]["epochs"]):
         history["epoch"].append(int(cfg["training"]["epochs"]))
     emit_history_block(history, int(cfg["training"]["epochs"]), final=True, summary=final_summary)
