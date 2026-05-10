@@ -11,6 +11,7 @@ matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
 import yaml
+import math
 
 
 HISTORY_BLOCK_BEGIN = "=== HISTORY_BLOCK_BEGIN ==="
@@ -33,6 +34,66 @@ def extract_history_payloads(log_text: str) -> list[dict[str, Any]]:
     return payloads
 
 
+def extract_progress_lines(log_text: str) -> dict[str, dict[int, float]]:
+    """Parse lines like:
+    Epoch 1/8000 | train_loss=5.103073 | train_acc=0.0097 | val_acc=0.0063 | test_acc=0.0104 | best_test_acc=0.0104
+
+    Returns mapping of metric -> {epoch: value}
+    """
+    epoch_pattern = re.compile(r"Epoch\s+(\d+)\s*/\s*(\d+)\s*\|\s*(.*)")
+    kv_pattern = re.compile(r"([a-zA-Z0-9_]+)\s*=\s*([-+0-9.eENaNnan]+)")
+    metrics: dict[str, dict[int, float]] = {}
+    for line in log_text.splitlines():
+        m = epoch_pattern.search(line)
+        if not m:
+            continue
+        epoch = int(m.group(1))
+        rest = m.group(3)
+        for kv in kv_pattern.finditer(rest):
+            key = kv.group(1)
+            raw = kv.group(2)
+            try:
+                val = float(raw)
+            except Exception:
+                try:
+                    val = float(raw.replace("nan", "NaN"))
+                except Exception:
+                    continue
+            # normalize keys
+            if key in ("train_acc", "train_accuracy"):
+                metric = "train_accuracy"
+            elif key in ("val_acc", "val_accuracy"):
+                metric = "val_accuracy"
+            elif key in ("test_acc", "test_accuracy"):
+                metric = "test_accuracy"
+            elif key in ("train_loss", "loss"):
+                metric = "train_loss"
+            elif key == "best_test_acc":
+                metric = "best_test_accuracy"
+            else:
+                metric = key
+            metrics.setdefault(metric, {})[epoch] = val
+    return metrics
+
+
+def build_history_from_progress(progress_map: dict[str, dict[int, float]]) -> dict[str, list[float]]:
+    # Collect all epochs seen
+    all_epochs = set()
+    for d in progress_map.values():
+        all_epochs.update(d.keys())
+    if not all_epochs:
+        return {}
+    epochs_sorted = sorted(all_epochs)
+    history: dict[str, list[float]] = {"epoch": epochs_sorted}
+    for metric, mapping in progress_map.items():
+        series: list[float] = []
+        for e in epochs_sorted:
+            v = mapping.get(e, float("nan"))
+            series.append(v)
+        history[metric] = series
+    return history
+
+
 def pick_latest_payload(payloads: list[dict[str, Any]]) -> dict[str, Any]:
     if not payloads:
         raise ValueError(f"No history blocks found between {HISTORY_BLOCK_BEGIN!r} and {HISTORY_BLOCK_END!r}")
@@ -42,7 +103,15 @@ def pick_latest_payload(payloads: list[dict[str, Any]]) -> dict[str, Any]:
 def finite_series(history: dict[str, list[float]], key: str) -> tuple[list[int], list[float]]:
     epochs = history.get("epoch", [])
     values = history.get(key, [])
-    points = [(int(epoch), float(value)) for epoch, value in zip(epochs, values) if value is not None]
+    points: list[tuple[int, float]] = []
+    for epoch, value in zip(epochs, values):
+        try:
+            v = float(value)
+        except Exception:
+            continue
+        if not math.isfinite(v):
+            continue
+        points.append((int(epoch), v))
     return [epoch for epoch, _ in points], [value for _, value in points]
 
 
@@ -112,9 +181,21 @@ def main() -> None:
     args = parser.parse_args()
 
     log_text = args.log_file.read_text(encoding="utf-8", errors="replace")
+    # Prefer final YAML history block if present
     payloads = extract_history_payloads(log_text)
-    payload = pick_latest_payload(payloads)
-    history = payload["history"]
+    history: dict[str, list[float]] | None = None
+    export_payload: dict[str, Any]
+    if payloads:
+        payload = pick_latest_payload(payloads)
+        history = payload.get("history", {})
+        export_payload = payload
+    else:
+        # Fallback: parse periodic progress lines
+        progress_map = extract_progress_lines(log_text)
+        history = build_history_from_progress(progress_map)
+        export_payload = {"history": history}
+    if not history:
+        raise SystemExit("No history found in log (no YAML block and no progress lines)")
 
     output_dir = args.output_dir or args.log_file.with_suffix("").with_name(args.log_file.stem + "_plots")
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -124,7 +205,7 @@ def main() -> None:
     plot_overview(history, output_dir / "history_overview.png")
 
     extracted_history = output_dir / "history_extracted.yaml"
-    extracted_history.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+    extracted_history.write_text(yaml.safe_dump(export_payload, sort_keys=False), encoding="utf-8")
 
     print(f"Wrote plots to {output_dir}")
 

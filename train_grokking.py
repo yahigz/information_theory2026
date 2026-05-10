@@ -930,9 +930,7 @@ def main() -> None:
         except Exception:
             pass
 
-    if not history["epoch"] or history["epoch"][-1] != int(cfg["training"]["epochs"]):
-        history["epoch"].append(int(cfg["training"]["epochs"]))
-    emit_history_block(history, int(cfg["training"]["epochs"]), final=True, summary=final_summary)
+    # Do not emit the full history block at the end; rely on in-training logging only.
 
     # Block until uploads finish so process doesn't exit before backend receives artifacts
     try:
