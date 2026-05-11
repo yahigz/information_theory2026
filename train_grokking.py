@@ -872,36 +872,31 @@ def main() -> None:
 
         if test_metrics["accuracy"] > best_test_accuracy:
             best_test_accuracy = test_metrics["accuracy"]
+        # Report gradient norm to ClearML and print sparse progress
+        try:
+            report_scalar_strict(logger, title="training", series="grad_norm", iteration=epoch, value=last_grad_norm)
+        except Exception:
+            pass
 
         if epoch == 1 or epoch % progress_print_interval == 0 or epoch == int(cfg["training"]["epochs"]):
             val_accuracy = val_metrics["accuracy"]
             test_accuracy = test_metrics["accuracy"]
             print(
                 "Epoch {epoch}/{total} | train_loss={train_loss:.6f} | train_acc={train_acc:.4f} | "
-                "val_acc={val_acc} | test_acc={test_acc} | best_test_acc={best_test:.4f}".format(
+                "val_acc={val_acc} | test_acc={test_acc} | grad_norm={grad_norm:.4f} | best_test_acc={best_test:.4f}".format(
                     epoch=epoch,
                     total=int(cfg["training"]["epochs"]),
                     train_loss=train_loss_epoch,
                     train_acc=train_acc_epoch,
                     val_acc=f"{val_accuracy:.4f}" if math.isfinite(val_accuracy) else "nan",
                     test_acc=f"{test_accuracy:.4f}" if math.isfinite(test_accuracy) else "nan",
+                    grad_norm=last_grad_norm,
                     best_test=best_test_accuracy,
                 ),
                 flush=True,
             )
 
-    final_test = evaluate(
-        model,
-        loaders["test"],
-        device,
-        label_smoothing=float(cfg["training"]["label_smoothing"]),
-    )
-    final_summary = {
-        "best_test_accuracy": best_test_accuracy,
-        "final_test_accuracy": final_test["accuracy"],
-        "final_test_loss": final_test["loss"],
-        "final_parameter_norm": parameter_l2_norm(model),
-    }
+    # Final test evaluation removed: use periodic test_metrics and best_test_accuracy instead.
     # Save model checkpoint locally and report its path
     try:
         artifacts_dir = Path(cfg.get("logging", {}).get("save_dir", "artifacts"))
