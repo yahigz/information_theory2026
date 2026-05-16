@@ -174,6 +174,21 @@ def plot_overview(history: dict[str, list[float]], output_path: Path) -> None:
     plt.close(fig)
 
 
+def plot_grad_norm(history: dict[str, list[float]], output_path: Path) -> None:
+    fig, ax = plt.subplots(figsize=(9, 5))
+    epochs, values = finite_series(history, "grad_norm")
+    if epochs:
+        ax.plot(epochs, values, label="grad_norm", linewidth=2)
+    ax.set_title("Gradient Norm")
+    ax.set_xlabel("epoch")
+    ax.set_ylabel("grad norm")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=160, bbox_inches="tight")
+    plt.close(fig)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Plot training curves from a downloaded ClearML worker log.")
     parser.add_argument("log_file", type=Path, help="Path to the downloaded worker log text file")
@@ -203,6 +218,7 @@ def main() -> None:
     plot_loss(history, output_dir / "history_loss.png")
     plot_accuracy(history, output_dir / "history_accuracy.png")
     plot_overview(history, output_dir / "history_overview.png")
+    plot_grad_norm(history, output_dir / "history_grad_norm.png")
 
     extracted_history = output_dir / "history_extracted.yaml"
     extracted_history.write_text(yaml.safe_dump(export_payload, sort_keys=False), encoding="utf-8")
